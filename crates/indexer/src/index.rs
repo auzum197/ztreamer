@@ -9,7 +9,8 @@ use heed::{
 };
 
 use crate::codec::{
-    CodecError, CompactBlockRecord, RangeDecoder, TreeSizes, decode_range_record, encode_range,
+    CodecError, CompactBlockRecord, RangeDecoder, StoredBlock, TreeSizes, decode_range_record,
+    encode_range,
 };
 use crate::{Digest, ingest::WriteBatch};
 
@@ -167,23 +168,39 @@ impl Index {
         read_state(self.metadata, &txn)
     }
 
-    /// Reads one block from a generation-pinned LMDB snapshot.
     pub fn read_block(
         &self,
         generation: u64,
         height: u32,
     ) -> Result<CompactBlockRecord, IndexError> {
+        self.read_block_as(generation, height)
+    }
+
+    /// Reads one block from a generation-pinned LMDB snapshot.
+    pub fn read_block_as<T: StoredBlock>(
+        &self,
+        generation: u64,
+        height: u32,
+    ) -> Result<T, IndexError> {
         let txn = self.env.read_txn()?;
         let state = self.read_generation(&txn, generation)?;
         self.read_record(&txn, state, height)
     }
 
-    /// Resolves and reads one canonical block hash from a generation-pinned LMDB snapshot.
     pub fn read_block_by_hash(
         &self,
         generation: u64,
         hash: Digest,
     ) -> Result<Option<CompactBlockRecord>, IndexError> {
+        self.read_block_by_hash_as(generation, hash)
+    }
+
+    /// Resolves and reads one canonical block hash from a generation-pinned LMDB snapshot.
+    pub fn read_block_by_hash_as<T: StoredBlock>(
+        &self,
+        generation: u64,
+        hash: Digest,
+    ) -> Result<Option<T>, IndexError> {
         let txn = self.env.read_txn()?;
         let state = self.read_generation(&txn, generation)?;
         self.hash_to_height
@@ -208,26 +225,35 @@ impl Index {
         self.read_range_in(&txn, state, start, end, emit)
     }
 
-    /// Reads an inclusive range against the current generation, with no generation check:
-    /// a caller streaming across commits verifies chain continuity between calls itself.
     pub fn read_range_latest(
         &self,
         start: u32,
         end: u32,
         emit: impl FnMut(CompactBlockRecord) -> bool,
     ) -> Result<(), IndexError> {
+        self.read_range_latest_as(start, end, emit)
+    }
+
+    /// Reads an inclusive range against the current generation, with no generation check:
+    /// a caller streaming across commits verifies chain continuity between calls itself.
+    pub fn read_range_latest_as<T: StoredBlock>(
+        &self,
+        start: u32,
+        end: u32,
+        emit: impl FnMut(T) -> bool,
+    ) -> Result<(), IndexError> {
         let txn = self.env.read_txn()?;
         let state = read_state(self.metadata, &txn)?;
         self.read_range_in(&txn, state, start, end, emit)
     }
 
-    fn read_range_in(
+    fn read_range_in<T: StoredBlock>(
         &self,
         txn: &RoTxn<'_>,
         state: IndexState,
         start: u32,
         end: u32,
-        mut emit: impl FnMut(CompactBlockRecord) -> bool,
+        mut emit: impl FnMut(T) -> bool,
     ) -> Result<(), IndexError> {
         let tip = state
             .durable_tip
@@ -255,7 +281,7 @@ impl Index {
                     end.max(range_start)
                 };
                 loop {
-                    if !emit(range.record((height - range_start) as usize)?) {
+                    if !emit(range.record_as((height - range_start) as usize)?) {
                         return Ok(());
                     }
                     if height == chunk_end {
@@ -285,26 +311,26 @@ impl Index {
         Ok(state)
     }
 
-    fn read_record(
+    fn read_record<T: StoredBlock>(
         &self,
         txn: &RoTxn<'_>,
         state: IndexState,
         height: u32,
-    ) -> Result<CompactBlockRecord, IndexError> {
+    ) -> Result<T, IndexError> {
         if state.durable_tip.is_none_or(|tip| height > tip.height) {
             return Err(IndexError::Coverage { height });
         }
         if state.sealed_through.is_some_and(|sealed| height <= sealed) {
             let start = height - height % RANGE_SIZE;
-            return decode_range_record(
+            return RangeDecoder::new(
                 self.sealed_ranges
                     .get(txn, &start)?
                     .ok_or(IndexError::Coverage { height })?,
-                (height - start) as usize,
-            )
+            )?
+            .record_as((height - start) as usize)
             .map_err(Into::into);
         }
-        CompactBlockRecord::decode(
+        T::decode(
             self.mutable_blocks
                 .get(txn, &height)?
                 .ok_or(IndexError::Coverage { height })?,
@@ -531,7 +557,7 @@ impl Index {
                 height: ancestor.height + 1,
             });
         }
-        let ancestor_record = self.read_record(&txn, state, ancestor.height)?;
+        let ancestor_record: CompactBlockRecord = self.read_record(&txn, state, ancestor.height)?;
         if ancestor_record.hash != ancestor.hash {
             return Err(IndexError::Replacement {
                 height: ancestor.height,
@@ -611,7 +637,7 @@ impl Index {
             });
         }
         let old_tip = state.durable_tip.ok_or(IndexError::Metadata)?;
-        let common = self.read_record(&txn, state, common_ancestor.height)?;
+        let common: CompactBlockRecord = self.read_record(&txn, state, common_ancestor.height)?;
         if common.hash != common_ancestor.hash {
             return Err(IndexError::Replacement {
                 height: common_ancestor.height,

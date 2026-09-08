@@ -2,14 +2,16 @@
 
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
-use ztreamer_protocol::proto::{self, compact_tx_streamer_server::CompactTxStreamer};
+use ztreamer_protocol::{
+    EncodedCompactBlock, proto, wire::compact_tx_streamer_server::CompactTxStreamer,
+};
 
 use crate::{CompactService, service::RpcStream};
 
 #[tonic::async_trait]
 impl CompactTxStreamer for CompactService {
-    type GetBlockRangeStream = RpcStream<proto::CompactBlock>;
-    type GetBlockRangeNullifiersStream = RpcStream<proto::CompactBlock>;
+    type GetBlockRangeStream = RpcStream<EncodedCompactBlock>;
+    type GetBlockRangeNullifiersStream = RpcStream<EncodedCompactBlock>;
     type GetTaddressTxidsStream = RpcStream<proto::RawTransaction>;
     type GetTaddressTransactionsStream = RpcStream<proto::RawTransaction>;
     type GetMempoolTxStream = RpcStream<proto::CompactTx>;
@@ -27,17 +29,19 @@ impl CompactTxStreamer for CompactService {
     async fn get_block(
         &self,
         request: Request<proto::BlockId>,
-    ) -> Result<Response<proto::CompactBlock>, Status> {
+    ) -> Result<Response<EncodedCompactBlock>, Status> {
         Ok(Response::new(
-            self.block(request.into_inner(), false).await?,
+            self.encoded_block(request.into_inner(), false).await?,
         ))
     }
 
     async fn get_block_nullifiers(
         &self,
         request: Request<proto::BlockId>,
-    ) -> Result<Response<proto::CompactBlock>, Status> {
-        Ok(Response::new(self.block(request.into_inner(), true).await?))
+    ) -> Result<Response<EncodedCompactBlock>, Status> {
+        Ok(Response::new(
+            self.encoded_block(request.into_inner(), true).await?,
+        ))
     }
 
     async fn get_block_range(
@@ -45,7 +49,7 @@ impl CompactTxStreamer for CompactService {
         request: Request<proto::BlockRange>,
     ) -> Result<Response<Self::GetBlockRangeStream>, Status> {
         Ok(Response::new(
-            self.range(request.into_inner(), false).await?,
+            self.encoded_range(request.into_inner(), false).await?,
         ))
     }
 
@@ -53,7 +57,9 @@ impl CompactTxStreamer for CompactService {
         &self,
         request: Request<proto::BlockRange>,
     ) -> Result<Response<Self::GetBlockRangeNullifiersStream>, Status> {
-        Ok(Response::new(self.range(request.into_inner(), true).await?))
+        Ok(Response::new(
+            self.encoded_range(request.into_inner(), true).await?,
+        ))
     }
 
     async fn get_transaction(

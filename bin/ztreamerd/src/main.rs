@@ -20,7 +20,7 @@ use ztreamer_indexer::{
     head::HeadSyncError, index::Index, pipeline::PipelineConfig, source::ZakuraSource,
 };
 use ztreamer_node as node;
-use ztreamer_protocol::proto::compact_tx_streamer_server::CompactTxStreamerServer;
+use ztreamer_protocol::wire::compact_tx_streamer_server::CompactTxStreamerServer;
 use ztreamer_service::{CompactService, HeadFollowerConfig, p2p::P2pCompactService};
 
 mod lifecycle;
