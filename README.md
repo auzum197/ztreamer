@@ -47,4 +47,12 @@ Ztreamer supports direct, in-process Zakura mode. It serves 24 of the 27 JSON-RP
 | Peak Physical Footprint |        3.66 GiB |
 | Total CPU seconds       |             493 |
 
-The benchmark indexed mainnet from genesis (to height 3,459,912) on an M3 Ultra with 512 GiB RAM and a warm cache. Serving throughput benchmarks will follow shortly.
+The benchmark indexed mainnet from genesis (to height 3,459,912) on an M3 Ultra with 512 GiB RAM and a warm cache.
+
+## Serving benchmarks
+
+`scripts/benchmark-serving.sh` measures RPC latencies, range-size scaling,
+concurrent serving, and compact-block wallet sync against a running server. It
+exports request samples and summaries as CSV and JSON for comparisons and later
+plotting. See [the benchmark guide](benchmarks/README.md) for workloads, fixtures,
+and HEAD-versus-release instructions.

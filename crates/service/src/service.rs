@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::Status;
 use tower::ServiceExt;
@@ -35,6 +35,7 @@ use ztreamer_indexer::{
 use ztreamer_protocol::{EncodedCompactBlock, proto};
 
 pub(crate) type RpcStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
+const MAX_RANGE_STREAMS: usize = 16;
 const MAX_UTXO_ADDRESSES: usize = 1_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,6 +150,7 @@ pub struct CompactService {
     chain_name: Arc<str>,
     zakura: ReadStateService,
     node: Option<NodeClient>,
+    range_streams: Arc<Semaphore>,
     ping_enabled: bool,
 }
 
@@ -167,6 +169,7 @@ impl CompactService {
             chain_name,
             zakura,
             node: None,
+            range_streams: Arc::new(Semaphore::new(MAX_RANGE_STREAMS)),
             ping_enabled: false,
         }
     }
@@ -491,18 +494,24 @@ impl CompactService {
         {
             return Err(Status::unavailable("canonical head source is stale"));
         }
+        let permit = Arc::clone(&self.range_streams)
+            .acquire_owned()
+            .await
+            .map_err(|_| Status::unavailable("range stream pool is closed"))?;
         let index = Arc::clone(&self.index);
         let ascending = start <= end;
         let durable_tip = snapshot.durable_tip.map(|tip| tip.height);
         let mut cursor = Some(start);
-        // Each stream retains at most one prepared chunk. The LMDB transaction ends
-        // inside read_range_latest_as, before transport backpressure can suspend
-        // the stream. A slow client must not occupy a global database-reader slot.
+        // Bound active streams so large ranges do not all compete for throughput.
+        // The permit lasts until the response stream is dropped, including transport
+        // backpressure. Each stream buffers one chunk; its LMDB transaction ends
+        // inside read_range_latest_as before yielding to the transport.
         let mut records = Vec::<T>::new().into_iter();
         // (hash, previous_hash) of the last record sent; every chunk must chain onto it.
         let mut last: Option<(Digest, Digest)> = None;
         Ok(Box::pin(tokio_stream::iter(std::iter::from_fn(
             move || loop {
+                let _ = &permit;
                 if let Some(record) = records.next() {
                     last = Some((record.hash(), record.previous_hash()));
                     return Some(Ok(project(record)));
@@ -1511,6 +1520,65 @@ mod tests {
                 assert_eq!(root.root_hash, vec![7; 32]);
                 assert_eq!(root.completing_block_hash, hash(1_007));
                 assert_eq!(root.completing_block_height, 1_007);
+            });
+    }
+
+    #[test]
+    fn range_admission_is_shared_and_releases_on_drop() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let dir = tempfile::tempdir().unwrap();
+                let index = Arc::new(
+                    Index::open(dir.path(), 10 * 1024 * 1024, "Mainnet", [9; 32]).unwrap(),
+                );
+                let state = index_through(&index, 200);
+                let (_state_service, read_service, _tip, _change) = zakura_state::init(
+                    Config::ephemeral(),
+                    &Network::Mainnet,
+                    block::Height::MAX,
+                    0,
+                )
+                .await
+                .expect("ephemeral state initializes");
+                let service = CompactService::new(index, state, "main", read_service);
+                let clone = service.clone();
+                let mut streams = Vec::new();
+                for _ in 0..MAX_RANGE_STREAMS {
+                    streams.push(service.encoded_range(range(0, 200), false).await.unwrap());
+                }
+                // Poll once to prove the limit applies across service clones.
+                let waiting = clone.encoded_range(range(0, 200), false);
+                tokio::pin!(waiting);
+                assert!(
+                    std::future::poll_fn(|cx| {
+                        std::task::Poll::Ready(
+                            std::future::Future::poll(waiting.as_mut(), cx).is_pending(),
+                        )
+                    })
+                    .await
+                );
+                drop(streams.pop());
+                let mut admitted = tokio::time::timeout(Duration::from_secs(1), waiting)
+                    .await
+                    .expect("dropping a response frees a slot")
+                    .unwrap();
+                let mut count = 0;
+                while let Some(block) = admitted.next().await {
+                    block.unwrap();
+                    count += 1;
+                }
+                assert_eq!(count, 201);
+                drop(admitted);
+                let _next_stream = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    service.encoded_range(range(0, 0), false),
+                )
+                .await
+                .expect("completed response frees a slot")
+                .unwrap();
             });
     }
 

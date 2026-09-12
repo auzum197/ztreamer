@@ -29,6 +29,10 @@ bench-index *args:
 load *args:
     bash scripts/benchmark-grpc.sh {{ args }}
 
+# RPC latency, range scaling, concurrency, and wallet download; CSV + JSON.
+bench-serving *args:
+    bash scripts/benchmark-serving.sh {{ args }}
+
 # Historical genesis→tip. Needs a writable Zakura cache and config.
 snapshot cache config *args:
     scripts/benchmark-snapshot.sh {{ cache }} {{ config }} {{ args }}
